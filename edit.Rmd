@@ -1,0 +1,1025 @@
+---
+title: "progetto"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r libraries,include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(jsonlite)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(purrr)
+library(countrycode)
+library(ggplot2)
+library(ggthemes)
+library(reshape2)
+library(gganimate)
+library(scales)
+library(sf)
+require(maps)
+require(viridis)
+
+```
+
+
+```{r read json,include=FALSE}
+json_file <- "dati/devices2.json"
+json_measurments <- "dati/msrmnts.json"
+json_data <- fromJSON(json_file)
+json_msrmnts <- fromJSON(json_measurments)
+
+msrmnts <- as.data.frame(json_msrmnts)
+devices <- as.data.frame(json_data)
+msrmnts
+clean_devices <- devices %>% mutate(country = order$user$country) %>% mutate(state = order$user$state) %>% select(id,goal_id,country,state,type,model,plant_id)
+clean_devices
+#msrmnts <- readRDS(file = "msrmnts.rds")
+#clean_devices <- readRDS(file = "clean_devices.rds")
+```
+
+
+```{r Clean Eteria and Natede,include=FALSE}
+Eteria_NatedeR1 <- msrmnts %>% filter(device_type == "NATEDE-R1" | device_type == "ETERIA")
+Eteria_NatedeR1 <- Eteria_NatedeR1$sensors_data %>% 
+  map(~ pivot_wider(.[,c("id","value")], names_from = id)) %>%
+  bind_rows() %>% 
+  bind_cols(Eteria_NatedeR1,.)
+Eteria_NatedeR1 <- Eteria_NatedeR1$status_data %>% 
+  map(~ pivot_wider(.[,c("id","value")], names_from = id)) %>%
+  bind_rows() %>% 
+  bind_cols(Eteria_NatedeR1,.)
+Eteria_NatedeR1
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'SN01TP'] <- 'Temperature'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'SN01HU'] <- 'Humidity'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'SN02VD'] <- 'Voc'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'SN02C2'] <- 'Co2'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'SY01DS'] <- 'pm25'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'goal...21'] <- 'goal'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'goal...9'] <- 'x'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'firmware'] <- 'firmware_version'
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'led_in'] <- 'led'
+Eteria_NatedeR1 <- Eteria_NatedeR1 %>% select(-status_data,-sensors_data,-data,-mode,-x)
+Eteria_NatedeR1 <- Eteria_NatedeR1 %>% mutate(Temperature_final = ifelse(is.na(TD01TP),Temperature,TD01TP))
+Eteria_NatedeR1 <- Eteria_NatedeR1 %>% select(-Temperature,-TD01TP,-led)
+colnames(Eteria_NatedeR1)[colnames(Eteria_NatedeR1) == 'Temperature_final'] <- 'Temperature'
+Eteria_NatedeR1$fan <- as.integer(Eteria_NatedeR1$fan)
+Eteria_NatedeR1$led <- as.integer(Eteria_NatedeR1$led)
+Eteria_NatedeR1 <- Eteria_NatedeR1 %>% mutate(led = led/100)
+```
+
+
+```{r Clean Other,include=FALSE}
+Other <- msrmnts %>% filter(device_type == "NATEDE" | is.na(device_type))
+Other <- Other$data %>%
+  bind_cols(Other,.)
+Other <- Other %>% 
+  mutate(Voc = ifelse(is.na(vocL),voc,vocL))
+colnames(Other)[colnames(Other) == 'tmp'] <- 'Temperature'
+colnames(Other)[colnames(Other) == 'hum'] <- 'Humidity'
+colnames(Other)[colnames(Other) == 'co2'] <- 'Co2'
+colnames(Other)[colnames(Other) == 'uv'] <- 'led'
+Other <- Other %>% select(-status_data,-sensors_data,-data,-voc,-vocL,-mode)
+Other
+```
+
+
+
+
+
+
+
+
+```{r Bind measures,include=FALSE}
+All_measurments <- bind_rows(Other,Eteria_NatedeR1)
+All_measurments %>% count(device_id) %>% arrange(desc(n))
+All_measurments$datetime <- as.POSIXct(All_measurments$datetime, format = "%Y-%m-%dT%H:%M:%S")
+All_measurments <- All_measurments %>% 
+  select(-led_out,-firmware_version,-timestamp)
+All_measurments <- All_measurments %>% mutate(datetime = cut(datetime, "10 min"))
+All_measurments <- All_measurments %>% 
+  group_by(device_id,datetime,goal,device_type) %>%
+  summarise(across(Humidity:Voc, ~ mean(.x)), .groups = "keep")
+```
+
+
+
+
+
+
+
+```{r Clean All_Data, include=FALSE}
+All_data <- All_measurments %>% left_join(clean_devices, by = c("device_id" = "id"))
+All_data <- All_data %>% mutate(goal = ifelse(goal==goal_id,goal,ifelse(goal=="general",goal_id,goal)))
+All_data <- select(All_data,-goal_id)
+All_data <- All_data %>% mutate(device_type = ifelse(is.na(device_type),type,device_type))
+as.POSIXct(All_data$datetime, format = "%Y-%m-%d %H:%M:%S")
+All_data <- All_data %>% ungroup()
+
+All_data %>% filter(Temperature>46)
+
+All_data <- All_data %>% mutate(Humidity =ifelse(Humidity > 100,50,Humidity))
+All_data <- All_data %>% mutate(co = ifelse(co>1,co/100,co))
+All_data <- All_data %>% mutate(co = ifelse(co>1,0.10,co))
+All_data <- All_data %>% mutate(pm25 = ifelse(pm25>200,NA,pm25))
+All_data <- All_data %>% mutate(Temperature = ifelse(Temperature>46,NA,Temperature))
+All_data <- All_data %>%mutate(co = ifelse(co == 0, NA, co))
+All_data_byweek <- All_data %>%
+  group_by(datetime) %>%
+  summarise(across(Humidity:Voc, ~ mean(.x,na.rm = TRUE))) %>%
+  ungroup()%>% 
+  mutate(week = cut.Date(as.Date(datetime), breaks = "1 week", labels = FALSE))
+
+All_data_byweek$datetime <- as.POSIXct(All_data_byweek$datetime, format = "%Y-%m-%d %H:%M:%S")
+
+All_data_byweek <- mutate(All_data_byweek,co = ifelse(is.na(co),0.20,co))
+
+All_data_byweek$day <- weekdays(as.Date(All_data_byweek$datetime))
+All_data_byweekday <- All_data_byweek %>%
+  ungroup() %>%
+  group_by(day,time = format(datetime, format("%H:%M:%S"))) %>%
+  summarise(across(Humidity:Voc, ~ mean(.x,na.rm = TRUE)))%>%
+  ungroup()
+All_data_byweekday<- All_data_byweekday%>%
+  mutate(time= as.POSIXct(ifelse(day == "lunedì",paste("2022-1-3",time),
+                                 ifelse(day == "martedì",paste("2022-1-4",time),
+                                        ifelse(day == "mercoledì",paste("2022-1-5",time),
+                                               ifelse(day == "giovedì",paste("2022-1-6",time),
+                                                      ifelse(day == "venerdì",paste("2022-1-7",time),
+                                                             ifelse(day == "sabato",paste("2022-1-8",time),paste("2022-1-9",time))))))), format = "%Y-%m-%d %H:%M:%S"))
+
+```
+
+
+```{r plots,include=FALSE}
+
+
+readRDS(file = "All_Data.rds")
+
+
+#-------------- Humidity PLOTS ------------------
+
+
+HumidityPlot_All_data_byweekday <- All_data_byweekday %>%
+  ggplot() +
+  geom_line(aes(x = time, y = Humidity,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(10,15,20,35,50,60,65,80),color = c("red","orange","yellow","green","green","yellow","orange","red"))+
+  geom_text(aes(max(time),10,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  geom_text(aes(max(time),15,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),20,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),35,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),50,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),60,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),65,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),80,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  scale_x_datetime(date_breaks = "4 hours", 
+                labels=time_format("%a %H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    plot.background = element_rect(fill = "#fcfcfc"),
+    panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+    panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+
+HumidityPlot_All_data_byweekday
+
+Animation_Humidity <- All_data_byweek %>%
+  ggplot() +
+  geom_line(aes(x = datetime, y = Humidity,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(10,15,20,35,50,60,65,80),color = c("red","orange","yellow","green","green","yellow","orange","red"))+
+  scale_x_datetime(date_breaks = "1 days", 
+                labels=date_format("%b-%d %a"),)+
+  transition_states(week,state_length = 4)+
+  view_follow(fixed_y = TRUE)+
+  labs(title = 'Umidità per settimana',
+       y = "Umidità",
+       x = "Data")+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+
+#-------------- Temperature PLOTS -------------
+
+Temperature_All_data_byweekday <- All_data_byweekday %>%
+  ggplot() +
+  geom_line(aes(x = time, y = Temperature,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(12,16,19,22,26,28,30,32),color = c("red","orange","yellow","green","green","yellow","orange","red"))+
+  geom_text(aes(max(time),12,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  geom_text(aes(max(time),16,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),19,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),22,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),26,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),28,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),30,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),32,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  scale_x_datetime(date_breaks = "4 hours", 
+                labels=time_format("%a %H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    plot.background = element_rect(fill = "#fcfcfc"),
+    panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+    panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+Temperature_All_data_byweekday
+
+
+
+Animation_Temperature <- All_data_byweek %>%
+  ggplot() +
+  geom_line(aes(x = datetime, y = Temperature,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(12,16,19,22,26,28,30,32),color = c("red","orange","yellow","green","green","yellow","orange","red"))+
+  scale_x_datetime(date_breaks = "1 days", 
+                labels=date_format("%b-%d %a"),)+
+  transition_states(week,state_length = 4)+
+  view_follow(fixed_y = TRUE)+
+  labs(title = 'Temperatura per settimana',
+       y = "Temperatura",
+       x = "Data")+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+#-------------- Voc PLOTS ----------
+
+VocPlot_All_data_byweekday <- All_data_byweekday%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Voc,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(0.5,1.3,3.2,7.5),color = c("green","yellow","orange","red"))+
+  geom_text(aes(max(time),0.5,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),1.3,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),3.2,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),7.5,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  scale_x_datetime(date_breaks = "4 hours", 
+                labels=time_format("%a %H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    plot.background = element_rect(fill = "#fcfcfc"),
+    panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+    panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+VocPlot_All_data_byweekday
+
+Animation_Voc <- All_data_byweek %>%
+  ggplot() +
+  geom_line(aes(x = datetime, y = Voc),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(0.5,1.3,3.2,7.5),color = c("green","yellow","orange","red"))+
+  scale_x_datetime(date_breaks = "1 days", 
+                labels=date_format("%b-%d %a"),)+
+  transition_states(week,state_length = 4)+
+  view_follow(fixed_y = TRUE)+
+  labs(title = 'Composti organici volatili per settimana',
+       y = "Composti Organici Volatili",
+       x = "Data")+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+  
+#-------------- Co PLOTS ------------------
+CoPlot_All_data_byweekday <- All_data_byweekday%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = co,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(0.10,0.20,0.30,0.60),color = c("green","yellow","orange","red"))+
+  geom_text(aes(max(time),0.10,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),0.20,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),0.30,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),0.60,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  scale_x_datetime(date_breaks = "4 hours", 
+                labels=time_format("%a %H:%M"),)+
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    plot.background = element_rect(fill = "#fcfcfc"),
+    panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+    panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+CoPlot_All_data_byweekday
+
+Animation_Co <- All_data_byweek %>%
+  ggplot(mapping = aes(x = datetime, y = co,group =1)) +
+  #geom_line(size = 1)+
+  
+  geom_smooth(method = "loess", formula = y~x,se = FALSE,color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(0.10,0.20,0.30,0.60),color = c("green","yellow","orange","red"))+
+  scale_x_datetime(date_breaks = "1 days", 
+                labels=date_format("%b-%d %a"),)+
+  transition_states(week,state_length = 4)+
+  view_follow(fixed_y = TRUE)+
+  labs(title = 'Monossido di Carbonio per settimana',
+       y = "Monossido di Carbonio",
+       x = "Data")+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+#-------------- pm25 PLOTS ------------------
+pm25Plot_All_data_byweekday <- All_data_byweekday%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = pm25,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(8, 22, 37, 52),color = c("green","yellow","orange","red"))+
+  geom_text(aes(max(time),8,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),22,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),37,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),52,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  scale_x_datetime(date_breaks = "4 hours", 
+                labels=time_format("%a %H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    plot.background = element_rect(fill = "#fcfcfc"),
+    panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+    panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+pm25Plot_All_data_byweekday
+
+Animation_pm25 <- All_data_byweek %>%
+  ggplot() +
+  geom_line(aes(x = datetime, y = pm25,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(8, 22, 37, 52),color = c("green","yellow","orange","red"))+
+  scale_x_datetime(date_breaks = "1 days", 
+                labels=date_format("%b-%d %a"),)+
+  transition_states(week,state_length = 4)+
+  view_follow(fixed_y = TRUE)+
+  labs(title = 'Polveri sottili per settimana',
+       y = "Polveri sottili",
+       x = "Data")+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r Co2,include=FALSE}
+
+#--------------- Co2 PLOTS -----------------
+
+All_data_Co2 <- All_data %>% filter(!is.na(Co2))
+All_data_Co2_byweek <- All_data_Co2 %>%
+  group_by(datetime) %>%
+  summarise(across(Co2, ~ mean(.x,na.rm = TRUE))) %>%
+  ungroup()%>% 
+  mutate(week = cut.Date(as.Date(datetime), breaks = "1 week", labels = FALSE))
+All_data_Co2_byweek$datetime <- as.POSIXct(All_data_Co2_byweek$datetime, format = "%Y-%m-%d %H:%M:%S")
+All_data_Co2_byweek$day <- weekdays(as.Date(All_data_Co2_byweek$datetime))
+All_data_Co2_byweekday <- All_data_Co2_byweek %>%
+  ungroup() %>%
+  group_by(day,time = format(datetime, format("%H:%M:%S"))) %>%
+  summarise(across(Co2, ~ mean(.x,na.rm = TRUE)))%>%
+  ungroup()
+All_data_Co2_byweekday<- All_data_Co2_byweekday%>%
+  mutate(time= as.POSIXct(ifelse(day == "lunedì",paste("2022-1-3",time),
+                                 ifelse(day == "martedì",paste("2022-1-4",time),
+                                        ifelse(day == "mercoledì",paste("2022-1-5",time),
+                                               ifelse(day == "giovedì",paste("2022-1-6",time),
+                                                      ifelse(day == "venerdì",paste("2022-1-7",time),
+                                                             ifelse(day == "sabato",paste("2022-1-8",time),paste("2022-1-9",time))))))), format = "%Y-%m-%d %H:%M:%S"))
+Co2Plot_All_data_Co2_byweekday <- All_data_Co2_byweekday%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Co2,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(1000,1500,2000,3000),color = c("green","yellow","orange","red"))+
+  geom_text(aes(max(time),1000,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),1500,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),2000,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),3000,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  scale_x_datetime(date_breaks = "4 hours", 
+                labels=time_format("%a %H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    plot.background = element_rect(fill = "#fcfcfc"),
+    panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+    panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+Co2Plot_All_data_Co2_byweekday
+
+All_data_Co2_bytime <- All_data_Co2_byweek %>%
+  ungroup() %>%
+  group_by(time = format(datetime, format("%H:%M:%S"))) %>%
+  summarise(across(Co2, ~ mean(.x,na.rm = TRUE)))%>%
+  ungroup()
+All_data_Co2_bytime$time <-as.POSIXct(All_data_Co2_bytime$time, format = "%H:%M")
+Co2Plot_All_data_Co2_bytime <- All_data_Co2_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Co2,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(1000,1500,2000,3000),color = c("green","yellow","orange","red"))+
+  geom_text(aes(max(time),1000,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),1500,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),2000,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),3000,label = "Pessima",vjust=-0.5),color = "red",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+Co2Plot_All_data_Co2_bytime
+
+Animation_Co2 <- All_data_Co2_byweek %>%
+  ggplot() +
+  geom_line(aes(x = datetime, y = Co2,group =1),color= "#18a848",size =1.1)+
+  geom_hline(yintercept = c(1000,1500,2000,3000),color = c("green","yellow","orange","red"))+
+  scale_x_datetime(date_breaks = "1 days", 
+                labels=date_format("%b-%d %a"),)+
+  transition_states(week,state_length = 4)+
+  view_follow(fixed_y = TRUE)+
+  labs(title = 'Co2 per settimana',
+       x = "Data")+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+```
+
+
+
+```{r animations}
+
+animate(Animation_Humidity)
+animate(Animation_Temperature)
+animate(Animation_Voc)
+animate(Animation_Co2)
+animate(Animation_Co)
+animate(Animation_pm25)
+
+
+```
+
+
+
+
+
+```{r Countries,include=FALSE}
+#------------- Country maps ----------------
+
+europeanUnion <- c("Austria","Belgium","Bulgaria","Croatia","Cyprus",
+                   "Czech Rep.","Denmark","Estonia","Finland","France",
+                   "Germany","Greece","Hungary","Ireland","Italy","Latvia",
+                   "Lithuania","Luxembourg","Malta","Netherlands","Poland", "Norway",
+                   "Portugal","Romania","Slovakia","Slovenia","Spain","Switzerland","Iceland",
+                   "Sweden","UK")
+
+clean_devices$countryname <- countrycode(clean_devices$country,"iso2c","country.name") 
+clean_devices <- clean_devices %>%
+  mutate(
+    countryname = ifelse(countryname == "United States", "USA", countryname)
+    )
+
+world_map <- map_data("world") %>% filter(region != "Antarctica")
+eu_map <- map_data("world", region = europeanUnion)
+
+count_devices <- clean_devices %>% count(countryname) %>% arrange(-n)
+Devices_eu_map <- right_join(count_devices,eu_map,by = c("countryname"="region"))
+Devices_map <- full_join(count_devices,world_map,by = c("countryname"="region"))
+devices
+Devices_map_plot <- ggplot(Devices_map, aes(long, lat, group = group))+
+  geom_polygon(aes(fill = n), color = "#999999") +
+  scale_fill_gradient(low = "light grey", high="green") +
+  theme_map()
+
+Devices_eumap_plot <- ggplot(Devices_eu_map, aes(long, lat, group = group))+
+  geom_polygon(aes(fill = n,color = n), color = "black") +
+  scale_fill_gradient(low = "light grey", high="green") +
+  theme_map()+
+  coord_map()+
+    coord_sf(crs = st_crs('+proj=moll'),
+             xlim = c(-30, 45), ylim = c(30, 73),
+             expand = FALSE) +
+  theme(
+    legend.position = c(.02, .50),
+    legend.justification = c("left", "top"),
+    legend.box.just = "left",
+    legend.margin = margin(6, 6, 6, 6)
+    )
+
+Devices_map_plot
+Devices_eumap_plot
+
+
+
+#------------- Country Analysis ----------------
+count_devices
+Chosen_Devices<- count_devices[1:11,]
+Chosen_Devices<-filter(Chosen_Devices, !is.na(countryname))
+Chosen_Devices$countryname[1] <-"United States"
+Chosen_Devices$countryname[3] <-"United Kingdom"
+Chosen_Data <- All_data %>%
+  filter(countrycode(country,"iso2c","country.name") %in% Chosen_Devices$countryname)
+
+Chosen_Data$datetime <- as.POSIXct(Chosen_Data$datetime, format = "%Y-%m-%d %H:%M:%S")
+
+Chosen_Data_bytime <- Chosen_Data %>%
+  ungroup() %>%
+  group_by(country, time = format(datetime, format("%H:%M:%S"))) %>%
+  summarise(across(Humidity:Voc, ~ mean(.x,na.rm=TRUE)))%>%
+  ungroup()
+Chosen_Data_bytime %>% filter(Humidity =="NaN")
+
+Chosen_Data_bytime$time <- as.POSIXct(Chosen_Data_bytime$time, format = "%H:%M")
+Chosen_Data_bytime <- Chosen_Data_bytime %>% filter(country %in% c("US","IT","GB","DE","AU","CA","NL"))
+
+
+Country_Voc_Plot <- Chosen_Data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Voc,color= country),size = 1)+
+  geom_hline(yintercept = c(0.5,1.3),color = c("green","yellow"))+
+  geom_text(aes(max(time),0.5,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),1.3,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),3.2,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  ylim(0,2)+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+
+Country_Humidity_Plot <- Chosen_Data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Humidity,color= country),size = 1)+
+  geom_hline(yintercept = c(15,20,35,50,60,65),color = c("orange","yellow","green","green","yellow","orange"))+
+  geom_text(aes(max(time),15,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),20,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),35,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),50,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),60,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),65,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+Country_Temperature_Plot <- Chosen_Data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Temperature,color= country),size = 1)+
+  geom_hline(yintercept = c(19,22,26,28),color = c("yellow","green","green","yellow"))+
+  geom_text(aes(max(time),19,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),22,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),26,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),28,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+Country_co_Plot <- Chosen_Data_bytime%>%
+  ungroup()%>%
+  ggplot(mapping = aes(x = time, y = co,color= country)) +
+  #geom_line(size = 1)+
+  
+  geom_smooth(formula = y~x,se = FALSE)+
+  geom_hline(yintercept = c(0.10,0.20,0.30),color = c("green","yellow","orange"))+
+  geom_text(aes(max(time),0.10,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),0.20,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),0.30,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+Country_pm25_Plot <- Chosen_Data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = pm25,color= country),size = 1)+
+  geom_hline(yintercept = c(8, 22, 37),color = c("green","yellow","orange"))+
+  geom_text(aes(max(time),8,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),22,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),37,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+
+Country_Co2_Plot <- Chosen_Data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Co2,color= country),size = 1)+
+  geom_hline(yintercept = c(1000,1500),color = c("green","yellow"))+
+  geom_text(aes(max(time),1000,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),1500,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+
+Country_Voc_Plot
+Country_Humidity_Plot
+Country_Temperature_Plot
+Country_co_Plot
+Country_pm25_Plot
+Country_Co2_Plot
+```
+
+
+
+
+
+
+
+```{r correlation}
+All_Italy_data <- All_data %>% filter(country == "IT")
+All_Italy_data %>% filter(fan == 0)
+All_Italy_Natede <- All_Italy_data %>% filter(device_type == "NATEDE")
+All_Italy_Natede <- filter(All_Italy_Natede, !is.na(pm25))
+All_Italy_Corr_byweek <- All_Italy_Natede %>%
+  group_by(device_id)%>%
+  summarise(across(c(Humidity,pm25,Voc,Co2), ~ cor(.x,led, use = "na.or.complete", method = c("pearson"))))
+  #ungroup()%>% 
+  #mutate(week = cut.Date(as.Date(datetime), breaks = "1 week", labels = FALSE))
+
+All_Italy_Corr_test_led <- All_Italy_Natede %>%
+  ungroup() %>%
+  group_by(device_id) %>%
+  summarise(across(c(Humidity,pm25,Voc,Co2), ~ cor(.x,led, use = "na.or.complete", method = c("pearson"))))
+All_Italy_Corr_test_led %>%
+  ungroup%>%
+  summarise(across(Humidity:Co2, ~ mean(.x,na.rm=TRUE)))
+Italy_Corr_led <- All_Italy_Corr_test_led %>%
+  ungroup%>%
+  summarise(across(Humidity:Co2, ~ mean(.x,na.rm=TRUE)))
+Italy_Corr_fan <- All_Italy_Corr_test_fan %>%
+  ungroup%>%
+  summarise(across(Humidity:Co2, ~ mean(.x,na.rm=TRUE)))
+
+# 
+# All_data_correct <- All_data %>% filter(fan <= 100 & led <=1)
+# All_data_correct <- All_data_correct %>% mutate(fan = ifelse(fan > 87.5,100,
+#                                                ifelse(fan > 62.5,75,
+#                                                       ifelse(fan > 37.5,50,
+#                                                              ifelse(fan > 12.5,25,0)))))
+# All_data_correct <- All_data_correct %>% mutate(led = ifelse(led == 0,0,1))
+# All_data_correct
+# All_data_correct$datetime <- as.POSIXct(All_data_correct$datetime, format = "%Y-%m-%d %H:%M:%S")
+# All_data_fan_correct_bytime <- All_data_correct %>%
+#   ungroup() %>%
+#   group_by(fan, time = format(datetime, format("%H:%M:%S"))) %>%
+#   summarise(across(c(Humidity,pm25,Voc,Co2,co), ~ mean(.x,na.rm=TRUE)))
+# 
+# All_data_fan_correct_bytime$fan <- as.character(All_data_fan_correct_bytime$fan)
+# All_Italy_data_fan_correct_bytime <- filter(All_Italy_data_fan_correct_bytime,fan != 75)
+# All_data_fan_correct_bytime$time <- as.POSIXct(All_data_fan_correct_bytime$time, format = "%H:%M")
+# 
+# Fan_Voc_Plot <- All_data_fan_correct_bytime%>%
+#   ungroup()%>%
+#   ggplot() +
+#   geom_line(aes(x = time, y = Voc,color= fan),size = 1)+
+#   geom_hline(yintercept = c(0.5,1.3),color = c("green","yellow"))+
+#   geom_text(aes(max(time),0.5,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+#   geom_text(aes(max(time),1.3,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+#   geom_text(aes(max(time),3.2,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+#   #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+#   scale_x_datetime(date_breaks = "2 hours",
+#                    date_minor_breaks = "1 hour", 
+#                 labels=time_format("%H:%M"),)+
+#                 #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+#   theme_minimal()+
+#   theme(plot.background = element_rect(fill = "#fcfcfc"),
+#   panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+#                                 colour = "light grey"), 
+#   panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+#                                 colour = "light grey"))
+# 
+# Fan_Voc_Plot
+```
+
+
+```{r Plants}
+
+#--------------Plant Analysis ----------------
+clean_devices %>% count(plant_id) %>% arrange(-n)
+Plant_data <- All_data %>% filter(!is.na(plant_id))
+Plant_data %>% filter(!is.na(Co2) )
+
+Plant_data <- Plant_data %>%mutate(co = ifelse(co == 0, NA, co))
+Chosen_Plants <-c("sanseveria","spathiphyllum","aloe","anthurium","dracaena","chlorophytum")
+Plant_data$datetime <- as.POSIXct(Plant_data$datetime, format = "%Y-%m-%d %H:%M:%S")
+
+Plant_data_bytime <- Plant_data %>%
+  ungroup() %>%
+  group_by(plant_id, time = format(datetime, format("%H:%M:%S"))) %>%
+  summarise(across(Humidity:Voc, ~ mean(.x,na.rm=TRUE)))%>%
+  ungroup()
+
+Plant_data_bytime$time <- as.POSIXct(Plant_data_bytime$time, format = "%H:%M")
+Chosen_Plant_data_bytime <- Plant_data_bytime %>%filter(plant_id %in% Chosen_Plants)
+
+Chosen_Plant_data_bytime %>% filter(is.na(Co2))
+
+#--------------Plant PLOTS ----------------
+Plant_Voc_Plot <- Chosen_Plant_data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Voc,color= plant_id),size = 1)+
+  geom_hline(yintercept = c(0.5,1.3),color = c("green","yellow"))+
+  geom_text(aes(max(time),0.5,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),1.3,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),3.2,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  ylim(0,2)+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+Plant_Humidity_Plot <- Chosen_Plant_data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Humidity,color= plant_id),size = 1)+
+  geom_hline(yintercept = c(15,20,35,50,60,65),color = c("orange","yellow","green","green","yellow","orange"))+
+  geom_text(aes(max(time),15,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  geom_text(aes(max(time),20,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),35,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),50,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),60,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),65,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+Plant_Temperature_Plot <- Chosen_Plant_data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = Temperature,color= plant_id),size = 1)+
+  geom_hline(yintercept = c(19,22,26,28),color = c("yellow","green","green","yellow"))+
+  geom_text(aes(max(time),19,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),22,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),26,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),28,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+Plant_co_Plot <- Chosen_Plant_data_bytime%>%
+  ungroup()%>%
+  ggplot(mapping = aes(x = time, y = co,color= plant_id)) +
+  #geom_line(size = 1)+
+  
+  geom_smooth(formula = y~x,se = FALSE)+
+  geom_hline(yintercept = c(0.10,0.20,0.30),color = c("green","yellow","orange"))+
+  geom_text(aes(max(time),0.10,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),0.20,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),0.30,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+Plant_pm25_Plot <- Chosen_Plant_data_bytime%>%
+  ungroup()%>%
+  ggplot() +
+  geom_line(aes(x = time, y = pm25,color= plant_id),size = 1)+
+  geom_hline(yintercept = c(8, 22, 37),color = c("green","yellow","orange"))+
+  geom_text(aes(max(time),8,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),22,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  geom_text(aes(max(time),37,label = "Scarsa",vjust=-0.5),color = "orange",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+
+Plant_Co2_Plot <- Chosen_Plant_data_bytime%>%
+  ungroup()%>%
+  ggplot(mapping = aes(x = time, y = Co2,color= plant_id)) +
+  #geom_line(size = 1)+
+  
+  geom_smooth(formula = y~x,se = FALSE)+
+  geom_hline(yintercept = c(1000,1500),color = c("green","yellow"))+
+  geom_text(aes(max(time),1000,label = "Buona",vjust=-0.5),color = "green",size = 3)+
+  geom_text(aes(max(time),1500,label = "Accettabile",vjust=-0.5),color = "yellow",size = 3)+
+  #xlim(as.Date(c('2021-10-01','2021-10-31')))+
+  scale_x_datetime(date_breaks = "2 hours",
+                   date_minor_breaks = "1 hour", 
+                labels=time_format("%H:%M"),)+
+                #limits = as.POSIXct(c('2021-10-01','2021-10-31')))+
+  theme_minimal()+
+  theme(plot.background = element_rect(fill = "#fcfcfc"),
+  panel.grid.major = element_line(size = 0.1, linetype = 'solid',
+                                colour = "light grey"), 
+  panel.grid.minor = element_line(size = 0.01, linetype = 'solid',
+                                colour = "light grey"))
+
+
+
+
+Plant_Voc_Plot
+Plant_Humidity_Plot
+Plant_Temperature_Plot
+Plant_co_Plot
+Plant_pm25_Plot
+Plant_Co2_Plot
+
+```
+
+
+```{r saving}
+
+HumidityPlot_All_data_byweekday <- HumidityPlot_All_data_byweekday + labs(x  = "Ora e Giorno", y = "Umidità")
+Temperature_All_data_byweekday <- Temperature_All_data_byweekday + labs(x  = "Ora e Giorno", y = "Temperatura")
+VocPlot_All_data_byweekday <- VocPlot_All_data_byweekday + labs(x  = "Ora e Giorno", y = "Composti Organici Volatili")
+CoPlot_All_data_byweekday <- CoPlot_All_data_byweekday + labs(x  = "Ora e Giorno", y = "Monossido di carbonio")
+pm25Plot_All_data_byweekday <- pm25Plot_All_data_byweekday + labs(x  = "Ora e Giorno", y = "Polveri sottili")
+Co2Plot_All_data_Co2_byweekday <- Co2Plot_All_data_Co2_byweekday + labs(x  = "Ora e Giorno", y = "Anidride carbonica")
+
+animate(Animation_Humidity,duration = 15,fps = 30)
+anim_save("Animation_Humidity.gif",path="gifs")
+animate(Animation_Temperature,duration = 15,fps = 30)
+anim_save("Animation_Temperature.gif",path="gifs")
+animate(Animation_Voc,duration = 15,fps = 30)
+anim_save("Animation_Voc.gif",path="gifs")
+animate(Animation_Co2,duration = 15,fps = 30)
+anim_save("Animation_Co2.gif",path="gifs")
+animate(Animation_Co,duration = 15,fps = 30)
+anim_save("Animation_Co.gif",path="gifs")
+animate(Animation_pm25,duration = 15,fps = 30)
+anim_save("Animation_pm25.gif",path="gifs")
+
+
+Devices_map_plot <- Devices_map_plot + labs(fill ="No. Dispositivi")
+Devices_eumap_plot <-  Devices_eumap_plot + labs(fill ="No. Dispositivi")
+Country_Voc_Plot <-  Country_Voc_Plot + labs(x  = "Ora", y = "Composti Organici Volatili", color = "Stato")
+Country_Humidity_Plot <-  Country_Humidity_Plot + labs(x  = "Ora", y = "Umidità", color = "Stato")
+Country_Temperature_Plot <-  Country_Temperature_Plot + labs(x  = "Ora", y = "Temperatura", color = "Stato")
+Country_co_Plot <-  Country_co_Plot + labs(x  = "Ora", y = "Monossido di carbonio", color = "Stato")
+Country_pm25_Plot <-  Country_pm25_Plot + labs(x  = "Ora", y = "Polveri sottili", color = "Stato")
+Country_Co2_Plot <-  Country_Co2_Plot + labs(x  = "Ora", y = "Anidride carbonica", color = "Stato")
+
+Italy_Corr <- Italy_Corr_fan %>% bind_rows(Italy_Corr_led) %>% bind_cols(Tipo = c("Fan","Led"))
+Italy_Corr <- bind_cols(Tipo = c("Fan","Led"),Italy_Corr)
+Italy_Corr
+saveRDS(Italy_Corr,file = "Italy_corr.rds")
+
+Plant_Voc_Plot <- Plant_Voc_Plot + labs(x  = "Ora", y = "Composti Organici Volatili", color = "Pianta")
+Plant_Humidity_Plot <- Plant_Humidity_Plot + labs(x  = "Ora", y = "Umidità", color = "Pianta")
+Plant_Temperature_Plot <- Plant_Temperature_Plot + labs(x  = "Ora", y = "Temperatura", color = "Pianta")
+Plant_co_Plot <- Plant_co_Plot + labs(x  = "Ora", y = "Monossido di carbonio", color = "Pianta")
+Plant_pm25_Plot <- Plant_pm25_Plot + labs(x  = "Ora", y = "Polveri sottili", color = "Pianta")
+Plant_Co2_Plot <- Plant_Co2_Plot + labs(x  = "Ora", y = "Anidride carbonica", color = "Pianta")
+
+Devices_map_plot
+
+ggsave("HumidityPlot_All_data_byweekday.jpg",plot = HumidityPlot_All_data_byweekday, path = "Plots",height = 7, width = 10)
+ggsave("Temperature_All_data_byweekday.jpg",plot = Temperature_All_data_byweekday, path = "Plots",height = 7, width = 10)
+ggsave("VocPlot_All_data_byweekday.jpg",plot = VocPlot_All_data_byweekday, path = "Plots",height = 7, width = 10)
+ggsave("CoPlot_All_data_byweekday.jpg",plot = CoPlot_All_data_byweekday, path = "Plots",height = 7, width = 10)
+ggsave("Co2Plot_All_data_byweekday.jpg",plot = Co2Plot_All_data_Co2_byweekday, path = "Plots",height = 7, width = 10)
+ggsave("pm25Plot_All_data_byweekday.jpg",plot = pm25Plot_All_data_byweekday, path = "Plots",height = 7, width = 10)
+
+
+ggsave("Devices_map_plot.jpg",plot = Devices_map_plot, path = "Plots",height = 7, width = 10)
+ggsave("Devices_eumap_plot.jpg",plot = Devices_eumap_plot, path = "Plots",height = 7, width = 10)
+ggsave("Country_Voc_Plot.jpg",plot = Country_Voc_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Country_Humidity_Plot.jpg",plot = Country_Humidity_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Country_Temperature_Plot.jpg",plot = Country_Temperature_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Country_co_Plot.jpg",plot = Country_co_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Country_pm25_Plot.jpg",plot = Country_pm25_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Country_Co2_Plot.jpg",plot = Country_Co2_Plot, path = "Plots",height = 7, width = 10)
+
+ggsave("Plant_Voc_Plot.jpg",plot = Plant_Voc_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Plant_Humidity_Plot.jpg",plot = Plant_Humidity_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Plant_Temperature_Plot.jpg",plot = Plant_Temperature_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Plant_co_Plot.jpg",plot = Plant_co_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Plant_pm25_Plot.jpg",plot = Plant_pm25_Plot, path = "Plots",height = 7, width = 10)
+ggsave("Plant_Co2_Plot.jpg",plot = Plant_Co2_Plot, path = "Plots",height = 7, width = 10)
+
+
+# saveRDS(msrmnts, file = "msrmnts.rds")
+# saveRDS(clean_devices, file = "clean_devices.rds")
+# saveRDS(Eteria_NatedeR1, file = "Clean_Eteria_NatedeR1.rds")
+# saveRDS(Other, file = "Clean_Other.rds")
+# saveRDS(All_data, file = "All_data.rds")
+```
+
